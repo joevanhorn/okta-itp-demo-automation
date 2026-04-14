@@ -1,0 +1,56 @@
+{
+  "description": "Entity risk policy synced from Okta Identity Threat Protection",
+  "last_synced": "2026-03-05T02:30:42.824006+00:00",
+  "version": "1.0",
+  "policy": {
+    "id": "rst1yr8u11qDt6moD1d8",
+    "name": "Entity Risk Policy",
+    "status": "ACTIVE",
+    "type": "ENTITY_RISK",
+    "created": "2025-10-23T14:24:30.000Z",
+    "lastUpdated": "2025-10-23T14:24:30.000Z"
+  },
+  "rules": [
+    {
+      "name": "Catch-all Rule",
+      "status": "ACTIVE",
+      "system": true,
+      "actions": {
+        "entityRisk": {
+          "actions": []
+        }
+      },
+      "_metadata": {
+        "id": "rul1yr8u11rf40R9U1d8",
+        "type": "ENTITY_RISK",
+        "priority": 99,
+        "created": "2025-10-23T14:24:30.000Z",
+        "lastUpdated": "2025-10-23T14:24:30.000Z"
+      }
+    }
+  ],
+  "notes": [
+    "This file manages the entity risk policy for Okta Identity Threat Protection (ITP)",
+    "Each Okta org has exactly ONE entity risk policy \u2014 it cannot be created or deleted",
+    "Only the RULES within the policy can be added, updated, or removed",
+    "",
+    "Rule Structure:",
+    "  - name: Display name for the rule",
+    "  - status: ACTIVE or INACTIVE",
+    "  - system: true for the default catch-all rule (cannot be deleted)",
+    "  - conditions.riskScore.level: HIGH, MEDIUM, or LOW",
+    "  - actions.entityRisk.actions: ['UNIVERSAL_LOGOUT'] or ['NONE']",
+    "",
+    "Available Actions:",
+    "  - UNIVERSAL_LOGOUT: Terminate all user sessions when risk threshold is met",
+    "  - NONE: Detect and log but take no action",
+    "",
+    "To add a new rule, add an entry to the 'rules' array and run:",
+    "  python3 scripts/apply_entity_risk_policy.py --config <this-file>",
+    "",
+    "To sync from Okta:",
+    "  python3 scripts/import_entity_risk_policy.py --output <this-file>",
+    "",
+    "The '_metadata' field in each rule contains read-only information from Okta"
+  ]
+}
