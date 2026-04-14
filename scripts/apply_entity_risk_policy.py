@@ -2,11 +2,44 @@
 """
 apply_entity_risk_policy.py
 
-Applies entity risk policy rule configuration from config JSON to Okta ITP.
+Applies entity risk policy rule configuration from a local JSON file to an
+Okta org's Identity Threat Protection (ITP) entity risk policy.
 
-Each Okta org has exactly one entity risk policy (immutable). This script
-manages the RULES within that policy: creating new rules, updating existing
-rules, and optionally deleting rules not present in the config.
+What are entity risk policies?
+  Every ITP-enabled Okta org has exactly ONE entity risk policy.  The policy
+  itself is immutable (cannot be created or deleted), but it contains an
+  ordered list of *rules* that define what automated action Okta should take
+  when a user's risk score reaches a given threshold.
+
+  Typical rules:
+    - "If risk is HIGH, perform UNIVERSAL_LOGOUT" (terminate all sessions)
+    - "If risk is MEDIUM, log but take no action"
+    - A system-managed catch-all rule (always present, cannot be deleted)
+
+  Correctly configuring these rules is critical for ITP demos because they
+  determine the visible remediation response (or lack thereof) when a risk
+  signal is injected.
+
+How the JSON config maps to Okta API calls:
+  The config file (produced by ``import_entity_risk_policy.py``) contains a
+  ``policy`` object (metadata only -- the policy ID) and a ``rules`` array.
+  Each rule has:
+    - name, status, conditions (riskScore.level), actions (entityRisk.actions)
+    - An optional ``_metadata`` block with the Okta-assigned rule ID (used for
+      matching during updates).
+
+  This script compares config rules against live Okta rules (matched by name
+  or by ``_metadata.id``) and generates a plan of CREATE / UPDATE / DELETE
+  operations, similar to ``terraform plan``.
+
+Dry-run mode (--dry-run):
+  Prints the planned changes without making any API calls.  Always run this
+  first to verify the diff before applying.
+
+Delete-removed mode (--delete-removed):
+  By default, rules that exist in Okta but are absent from the config file
+  are left untouched.  Pass ``--delete-removed`` to remove them.  System
+  rules (the catch-all) are never deleted regardless of this flag.
 
 Usage:
     python3 scripts/apply_entity_risk_policy.py --config config/entity_risk_policy.json --dry-run
@@ -23,7 +56,15 @@ from typing import List, Dict, Optional
 
 
 class EntityRiskPolicyApplier:
-    """Applies entity risk policy rule configuration to Okta"""
+    """Applies entity risk policy rule configuration to Okta.
+
+    Implements a plan-then-apply workflow:
+      1. load_config()      -- parse the local JSON config file
+      2. get_policy_id()    -- resolve the org's single entity risk policy ID
+      3. get_existing_rules() -- fetch current rules from Okta (indexed by name)
+      4. plan_changes()     -- diff config vs. live rules to produce a changeset
+      5. apply_changes()    -- execute CREATE / UPDATE / DELETE API calls
+    """
 
     def __init__(self, org_name: str, base_url: str, api_token: str, dry_run: bool = False):
         self.org_name = org_name
@@ -63,7 +104,11 @@ class EntityRiskPolicyApplier:
             return None
 
     def get_policy_id(self) -> Optional[str]:
-        """Fetch the entity risk policy ID from Okta"""
+        """Fetch the entity risk policy ID from Okta.
+
+        There is exactly one ENTITY_RISK policy per org.  If none is found,
+        ITP is likely not enabled on this org.
+        """
         url = f"{self.api_base}/policies"
         params = {"type": "ENTITY_RISK"}
 
@@ -89,7 +134,11 @@ class EntityRiskPolicyApplier:
             return None
 
     def get_existing_rules(self, policy_id: str) -> Dict[str, Dict]:
-        """Fetch existing rules from Okta, indexed by name"""
+        """Fetch existing rules from Okta, indexed by rule name.
+
+        Indexing by name allows the plan_changes() method to match config rules
+        to live rules without requiring every config rule to carry an Okta ID.
+        """
         print("\n" + "=" * 80)
         print("FETCHING EXISTING RULES FROM OKTA")
         print("=" * 80)
@@ -128,10 +177,14 @@ class EntityRiskPolicyApplier:
             return {}
 
     def create_rule(self, policy_id: str, rule_config: Dict) -> Dict:
-        """Create a new rule in the entity risk policy"""
+        """Create a new rule in the entity risk policy via POST.
+
+        Only the mutable fields (name, status, conditions, actions) are sent;
+        read-only fields like _metadata and system are stripped.
+        """
         url = f"{self.api_base}/policies/{policy_id}/rules"
 
-        # Build payload — strip metadata and system flag
+        # Build payload -- only include fields the API accepts for creation.
         payload = {
             "name": rule_config.get("name"),
             "status": rule_config.get("status", "ACTIVE"),
@@ -161,7 +214,7 @@ class EntityRiskPolicyApplier:
             return {"status": "error", "error": str(e)}
 
     def update_rule(self, policy_id: str, rule_id: str, rule_config: Dict) -> Dict:
-        """Update an existing rule"""
+        """Update an existing rule via PUT (full replacement)."""
         url = f"{self.api_base}/policies/{policy_id}/rules/{rule_id}"
 
         payload = {
@@ -220,7 +273,19 @@ class EntityRiskPolicyApplier:
 
     def plan_changes(self, config_rules: List[Dict], existing_rules: Dict[str, Dict],
                      delete_removed: bool) -> Dict:
-        """Determine what changes need to be made"""
+        """Diff config rules against live Okta rules and produce a changeset.
+
+        Matching strategy (in priority order):
+          1. Match by rule *name* (most common path).
+          2. If no name match, fall back to ``_metadata.id`` from the config
+             (covers rules that were renamed locally).
+          3. If neither matches, the rule is new and will be created.
+
+        For matched rules, actions/conditions/status are compared; if any
+        differ, the rule is queued for update.  None/null values are
+        normalized to empty dicts so that API quirks (returning null for the
+        catch-all rule's conditions) do not cause spurious diffs.
+        """
         print("\n" + "=" * 80)
         print("PLANNING CHANGES")
         print("=" * 80)
@@ -231,19 +296,25 @@ class EntityRiskPolicyApplier:
             "delete": []
         }
 
+        # Track which existing rules have been accounted for by a config rule.
+        # Any unmatched existing rules may be candidates for deletion.
         matched_existing = set()
 
         for config_rule in config_rules:
             rule_name = config_rule.get("name")
+            # The _metadata.id field is set by import_entity_risk_policy.py and
+            # carries the Okta-assigned rule ID.  It serves as a fallback
+            # identifier when the rule name has been changed in the config.
             metadata_id = config_rule.get("_metadata", {}).get("id") if config_rule.get("_metadata") else None
 
             if rule_name in existing_rules:
+                # --- Name-matched rule: compare fields to decide update vs. no-op ---
                 existing_rule = existing_rules[rule_name]
                 existing_id = existing_rule.get("id")
                 matched_existing.add(rule_name)
 
-                # Check if anything actually changed
-                # Normalize None to {} for comparison (API returns null for catch-all)
+                # Normalize None to {} for comparison because the Okta API
+                # returns null for the system catch-all rule's conditions/actions.
                 existing_actions = existing_rule.get("actions") or {}
                 config_actions = config_rule.get("actions") or {}
                 existing_conditions = existing_rule.get("conditions") or {}
@@ -264,6 +335,8 @@ class EntityRiskPolicyApplier:
                     print(f"  ✅ NO CHANGE: {rule_name} (ID: {existing_id})")
 
             elif metadata_id:
+                # --- Fallback: no name match, but _metadata.id exists ---
+                # The rule was likely renamed locally; update by ID.
                 matched_existing.add(rule_name)
                 changes["update"].append({
                     "config": config_rule,
@@ -273,18 +346,23 @@ class EntityRiskPolicyApplier:
                 print(f"  📝 UPDATE: {rule_name} (ID from metadata: {metadata_id})")
 
             else:
+                # --- No match at all: this is a brand-new rule ---
                 changes["create"].append({"config": config_rule})
                 print(f"  ➕ CREATE: {rule_name}")
 
+        # --- Handle rules in Okta that are NOT in the config file ---
         if delete_removed:
             for existing_name, existing_rule in existing_rules.items():
                 if existing_name not in matched_existing:
-                    # Never delete system rules (catch-all)
+                    # System rules (the default catch-all) are managed by Okta
+                    # and cannot be deleted via API -- skip them.
                     if existing_rule.get("system"):
                         print(f"  ⚠️  SKIP DELETE (system rule): {existing_name}")
                         continue
 
                     existing_id = existing_rule.get("id")
+                    # Double-check: if a config rule references this Okta rule by
+                    # _metadata.id (but under a different name), do not delete it.
                     id_matched = any(
                         r.get("_metadata", {}).get("id") == existing_id
                         for r in config_rules
@@ -302,7 +380,12 @@ class EntityRiskPolicyApplier:
         return changes
 
     def apply_changes(self, policy_id: str, changes: Dict) -> Dict:
-        """Execute the planned changes"""
+        """Execute the planned CREATE / UPDATE / DELETE operations against Okta.
+
+        In dry-run mode, each operation prints what *would* happen but makes no
+        API calls.  Returns a results dict with per-operation status and a
+        summary of successes/errors.
+        """
         print("\n" + "=" * 80)
         if self.dry_run:
             print("APPLYING CHANGES (DRY RUN)")
@@ -389,7 +472,7 @@ class EntityRiskPolicyApplier:
         return results
 
     def run(self, config_file: str, delete_removed: bool = False):
-        """Main execution"""
+        """Orchestrate the full load -> diff -> apply workflow."""
         print("=" * 80)
         if self.dry_run:
             print("ENTITY RISK POLICY APPLIER (DRY RUN MODE)")
@@ -404,7 +487,8 @@ class EntityRiskPolicyApplier:
 
         config_rules = config.get("rules", [])
 
-        # Get the policy ID from Okta (or from config)
+        # Resolve the policy ID.  Prefer the live API response; fall back to
+        # the ID stored in the config file (useful for offline/test scenarios).
         config_policy_id = config.get("policy", {}).get("id")
 
         print(f"\nResolving entity risk policy ID...")

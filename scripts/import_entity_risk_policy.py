@@ -2,9 +2,39 @@
 """
 import_entity_risk_policy.py
 
-Imports entity risk policy and rules from Okta ITP to a local config JSON file.
-Each Okta org has exactly one entity risk policy with configurable rules that
-determine actions (e.g., UNIVERSAL_LOGOUT) when user risk reaches certain levels.
+Imports the entity risk policy and its rules from a live Okta org into a local
+JSON config file that can be version-controlled and later re-applied with
+``apply_entity_risk_policy.py``.
+
+Why import?
+  Entity risk policy rules are the heart of ITP's automated response.  They
+  map risk-score thresholds (HIGH, MEDIUM, LOW) to remediation actions
+  (UNIVERSAL_LOGOUT or NONE).  Keeping a local copy lets you:
+    - Track changes over time via git.
+    - Replicate the same policy across demo orgs.
+    - Review and dry-run changes before pushing them back to Okta.
+
+What happens during import:
+  1. The script fetches the org's single ENTITY_RISK policy via
+     ``GET /api/v1/policies?type=ENTITY_RISK``.
+  2. It fetches all rules under that policy via
+     ``GET /api/v1/policies/{id}/rules``.
+  3. Each rule is *transformed*: read-only / server-managed fields (id, type,
+     priority, created, lastUpdated) are moved into a ``_metadata`` block so
+     they are preserved for reference but clearly separated from the mutable
+     fields that ``apply_entity_risk_policy.py`` will send back to the API.
+  4. The result is written as a JSON file with embedded documentation (the
+     ``notes`` array) explaining the schema.
+
+Output format:
+  {
+    "description": "...",
+    "last_synced": "<ISO timestamp of this import>",
+    "version": "1.0",
+    "policy": { <policy metadata> },
+    "rules": [ { <transformed rules> } ],
+    "notes": [ <inline documentation> ]
+  }
 
 Usage:
     python3 scripts/import_entity_risk_policy.py
@@ -21,7 +51,11 @@ from datetime import datetime, timezone
 
 
 class EntityRiskPolicyImporter:
-    """Imports entity risk policy from Okta to local config"""
+    """Imports entity risk policy and rules from Okta to a local JSON config.
+
+    The import flow is: get_entity_risk_policy() -> get_policy_rules() ->
+    transform_rules() + transform_policy() -> save_to_file().
+    """
 
     def __init__(self, org_name: str, base_url: str, api_token: str):
         self.org_name = org_name
@@ -88,7 +122,12 @@ class EntityRiskPolicyImporter:
             return None
 
     def get_policy_rules(self, policy_id: str) -> List[Dict]:
-        """Fetch all rules for an entity risk policy"""
+        """Fetch all rules for the entity risk policy.
+
+        Each rule has: name, status, system (bool), conditions (riskScore
+        threshold), actions (entityRisk.actions array), plus server-managed
+        fields (id, type, priority, created, lastUpdated).
+        """
         print(f"\nFetching rules for policy {policy_id}...")
 
         url = f"{self.api_base}/policies/{policy_id}/rules"
@@ -130,11 +169,22 @@ class EntityRiskPolicyImporter:
             return []
 
     def transform_rules(self, raw_rules: List[Dict]) -> List[Dict]:
-        """Transform raw API rules to config format, stripping read-only fields"""
+        """Transform raw API rules to config format, separating mutable from read-only fields.
+
+        Mutable fields (name, status, conditions, actions) become top-level
+        keys that ``apply_entity_risk_policy.py`` will send back to the API.
+
+        Read-only / server-managed fields (id, type, priority, created,
+        lastUpdated) are placed in a ``_metadata`` block.  The ``_metadata.id``
+        is especially important: ``apply_entity_risk_policy.py`` uses it as a
+        fallback identifier when matching config rules to live rules (e.g., if
+        a rule was renamed locally).
+        """
         print("\nTransforming rules for config file...")
 
         transformed = []
         for rule in raw_rules:
+            # Keep only the mutable fields at the top level.
             transformed_rule = {
                 "name": rule.get("name"),
                 "status": rule.get("status"),
@@ -143,10 +193,11 @@ class EntityRiskPolicyImporter:
                 "actions": rule.get("actions", {}),
             }
 
-            # Clean up None values
+            # Drop keys whose value is None so the config file stays clean.
             transformed_rule = {k: v for k, v in transformed_rule.items() if v is not None}
 
-            # Add metadata for reference (read-only)
+            # Capture read-only metadata from the API response.  These fields
+            # are informational and will not be sent back on create/update.
             transformed_rule["_metadata"] = {
                 "id": rule.get("id"),
                 "type": rule.get("type"),
@@ -161,7 +212,11 @@ class EntityRiskPolicyImporter:
         return transformed
 
     def transform_policy(self, raw_policy: Dict) -> Dict:
-        """Transform raw policy to config format metadata"""
+        """Extract policy-level metadata for the config file.
+
+        The policy object itself is immutable (one per org, cannot be created
+        or deleted), so we only store its identifying fields for reference.
+        """
         return {
             "id": raw_policy.get("id"),
             "name": raw_policy.get("name"),
@@ -172,7 +227,12 @@ class EntityRiskPolicyImporter:
         }
 
     def save_to_file(self, policy_meta: Dict, rules: List[Dict], output_file: str):
-        """Save entity risk policy config to JSON file"""
+        """Save entity risk policy config to a JSON file with embedded docs.
+
+        The output file includes a ``notes`` array with inline documentation
+        explaining the schema and available actions, so that anyone reading the
+        JSON understands how to modify it without needing external docs.
+        """
         print(f"\nSaving entity risk policy to {output_file}...")
 
         config = {
@@ -216,8 +276,8 @@ class EntityRiskPolicyImporter:
         return config
 
     def import_policy(self, output_file: str) -> bool:
-        """Run the complete import process"""
-        # Fetch policy
+        """Run the complete import process: fetch -> transform -> save."""
+        # Fetch the org's single entity risk policy
         policy = self.get_entity_risk_policy()
         if not policy:
             print("\n⚠️  No entity risk policy found — ITP may not be enabled on this org")

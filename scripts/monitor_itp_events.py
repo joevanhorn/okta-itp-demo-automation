@@ -3,11 +3,29 @@
 monitor_itp_events.py
 
 Real-time monitor for Okta Identity Threat Protection (ITP) events.
-Polls the system log for ITP-related events and displays them with formatting.
+Polls the Okta System Log (/api/v1/logs) for ITP-related events and displays
+them with color-coded severity indicators and contextual detail.
+
+This is a key tool for ITP demos: run it in a terminal before triggering a
+risk signal so stakeholders can watch Okta detect risk, evaluate entity risk
+policy rules, and execute automated remediation (e.g., universal logout) in
+real time.
+
+Event types watched (see ITP_EVENT_TYPES):
+  - user.risk.detect          A risk signal was received for a user (from SSF,
+                               session hijacking detection, or admin API).
+  - policy.entity_risk.evaluate  The entity risk policy engine evaluated rules
+                               against the user's current risk level.
+  - policy.entity_risk.action An automated action (e.g., UNIVERSAL_LOGOUT)
+                               was triggered by an entity risk policy rule.
+  - user.session.end          A user's session was terminated (often the result
+                               of a UNIVERSAL_LOGOUT action).
+  - user.authentication.universal_logout  Okta sent Universal Logout signals to
+                               all integrated apps for this user.
 
 Usage:
     python3 scripts/monitor_itp_events.py --duration 60
-    python3 scripts/monitor_itp_events.py --user joe.vanhorn@taskvantage.com --duration 120
+    python3 scripts/monitor_itp_events.py --user user@example.com --duration 120
     python3 scripts/monitor_itp_events.py --event-types user.risk.detect,policy.entity_risk.action
 """
 
@@ -21,13 +39,16 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 
 
-# ITP event types
+# ITP event types to monitor by default.  These represent the full lifecycle of
+# an ITP risk-detect-and-respond flow:
+#   1. Risk detected  ->  2. Policy evaluated  ->  3. Action taken  ->
+#   4/5. Sessions terminated / Universal Logout broadcast
 ITP_EVENT_TYPES = [
-    "user.risk.detect",
-    "policy.entity_risk.evaluate",
-    "policy.entity_risk.action",
-    "user.session.end",
-    "user.authentication.universal_logout",
+    "user.risk.detect",                      # Risk signal ingested for a user
+    "policy.entity_risk.evaluate",           # Policy engine evaluated rules
+    "policy.entity_risk.action",             # Automated action was executed
+    "user.session.end",                      # User session was terminated
+    "user.authentication.universal_logout",  # UL signals sent to apps
 ]
 
 
@@ -43,8 +64,11 @@ class ITPEventMonitor:
             "Content-Type": "application/json",
             "Accept": "application/json"
         }
+        # Reuse a single requests.Session for connection pooling across polls
         self.session = requests.Session()
         self.session.headers.update(self.headers)
+        # Track event UUIDs we have already displayed so we never print duplicates
+        # when poll windows overlap.
         self.seen_events = set()
 
     def build_filter(self, event_types: List[str], user: Optional[str] = None) -> str:
@@ -63,15 +87,21 @@ class ITPEventMonitor:
 
     def poll_events(self, since: str, event_types: List[str],
                     user: Optional[str] = None) -> List[dict]:
-        """Poll system log for new ITP events"""
+        """Poll the Okta System Log for new ITP events since the given timestamp.
+
+        The System Log API is polled with ASCENDING sort order so that the
+        caller can advance the ``since`` cursor to the timestamp of the last
+        returned event, avoiding unbounded result growth over long monitoring
+        sessions.
+        """
         url = f"{self.api_base}/logs"
         filter_expr = self.build_filter(event_types, user)
 
         params = {
             "since": since,
             "filter": filter_expr,
-            "sortOrder": "ASCENDING",
-            "limit": 100,
+            "sortOrder": "ASCENDING",  # Oldest first so we can advance the cursor
+            "limit": 100,              # Max page size to reduce round-trips
         }
 
         try:
@@ -79,7 +109,8 @@ class ITPEventMonitor:
             response.raise_for_status()
 
             events = response.json()
-            # Filter out already-seen events
+            # De-duplicate: the poll window may overlap with the previous one,
+            # so we track each event's UUID and skip any we have already shown.
             new_events = []
             for event in events:
                 event_id = event.get("uuid")
@@ -103,7 +134,15 @@ class ITPEventMonitor:
             return []
 
     def format_event(self, event: dict) -> str:
-        """Format a single event for display"""
+        """Format a single ITP event for human-readable console output.
+
+        Each event is prefixed with a two-character severity indicator:
+          !!  risk detected (user.risk.detect)
+          ??  policy evaluation (policy.entity_risk.evaluate)
+          >>  automated action taken (policy.entity_risk.action)
+          XX  session ended or universal logout sent
+          --  any other event type
+        """
         event_type = event.get("eventType", "unknown")
         published = event.get("published", "")
         actor = event.get("actor", {})
@@ -113,7 +152,8 @@ class ITPEventMonitor:
         outcome_reason = outcome.get("reason", "")
         display_message = event.get("displayMessage", "")
 
-        # Extract client info
+        # Extract client/network context -- useful for demonstrating that Okta
+        # captures the originating IP and geolocation of the risk signal.
         client = event.get("client", {})
         ip_address = client.get("ipAddress", "")
         geo = client.get("geographicalContext") or {}
@@ -121,25 +161,29 @@ class ITPEventMonitor:
         country = geo.get("country", "")
         geo_str = f"{city}, {country}" if city else country
 
-        # Extract target info
+        # Extract target info -- for ITP events the target is typically the
+        # affected user (not the actor, which is often the system/API token).
         targets = event.get("target", [])
         target_str = ""
         if targets:
             target_names = [t.get("displayName", t.get("alternateId", "")) for t in targets]
             target_str = ", ".join(filter(None, target_names))
 
-        # Extract debug data for risk details
+        # debugContext.debugData carries risk-specific detail that is not in
+        # the top-level event fields -- riskLevel and riskReasons are the most
+        # interesting for demo narration.
         debug_data = event.get("debugContext", {}).get("debugData", {})
         risk_level = debug_data.get("riskLevel", "")
         risk_reasons = debug_data.get("riskReasons", "")
 
-        # Build severity indicator
+        # Two-character severity indicator shown at the start of each event
+        # line so the audience can visually track the flow at a glance.
         severity_map = {
-            "user.risk.detect": "!!",
-            "policy.entity_risk.action": ">>",
-            "policy.entity_risk.evaluate": "??",
-            "user.session.end": "XX",
-            "user.authentication.universal_logout": "XX",
+            "user.risk.detect": "!!",                       # Alert: risk signal
+            "policy.entity_risk.action": ">>",              # Action executed
+            "policy.entity_risk.evaluate": "??",            # Policy evaluated
+            "user.session.end": "XX",                       # Session killed
+            "user.authentication.universal_logout": "XX",   # UL broadcast
         }
         severity = severity_map.get(event_type, "--")
 
@@ -197,7 +241,9 @@ class ITPEventMonitor:
         print("=" * 80)
         print()
 
-        # Start from 30 seconds ago to catch recently fired events
+        # Start the query window 30 seconds in the past so that events fired
+        # just before the monitor started (e.g., a trigger_itp_demo.py that
+        # was kicked off moments earlier) are still captured.
         since = (datetime.now(timezone.utc) - timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         start_time = time.time()
         all_events = []
@@ -206,6 +252,8 @@ class ITPEventMonitor:
         print(f"Monitoring... (press Ctrl+C to stop)\n")
 
         try:
+            # Main polling loop: repeatedly query the System Log until the
+            # requested duration elapses or the user presses Ctrl+C.
             while (time.time() - start_time) < duration:
                 elapsed = int(time.time() - start_time)
                 remaining = duration - elapsed
@@ -220,14 +268,18 @@ class ITPEventMonitor:
                         print()
                         all_events.append(event)
 
-                    # Update since to latest event time
+                    # Advance the cursor to the latest event's timestamp so the
+                    # next poll only fetches newer events.
                     latest = new_events[-1].get("published", since)
                     since = latest
                 else:
-                    # Progress indicator
+                    # No new events this cycle -- show a progress line so the
+                    # user knows the monitor is still running.
                     sys.stdout.write(f"\r  Waiting for events... ({remaining}s remaining, {event_count} captured)")
                     sys.stdout.flush()
 
+                # Sleep between polls to avoid hammering the API and to respect
+                # Okta rate limits (system log allows ~50 req/min).
                 time.sleep(poll_interval)
 
         except KeyboardInterrupt:
