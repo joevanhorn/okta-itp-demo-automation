@@ -376,7 +376,8 @@ class SessionAuthenticator:
     def authenticate(self, username: str, password: str,
                      totp_secret: Optional[str] = None,
                      timeout: int = 30000,
-                     record_video: Optional[str] = None) -> Dict:
+                     record_video: Optional[str] = None,
+                     allow_api_fallback: bool = True) -> Dict:
         """
         Authenticate to Okta and capture session cookie (one-time mode).
 
@@ -394,6 +395,9 @@ class SessionAuthenticator:
             timeout: Playwright default timeout in milliseconds.
             record_video: Directory path to save video recording of the browser
                           session. If None, no video is recorded.
+            allow_api_fallback: If False, return the browser error instead of
+                          falling back. A replayed API-mode sid does not trigger
+                          session hijacking detection, so real mode disables this.
 
         Returns:
             Dict with keys: status, cookie_name, cookie, domain, user_agent,
@@ -404,6 +408,9 @@ class SessionAuthenticator:
             username, password, totp_secret, timeout, record_video=record_video
         )
         if result["status"] == "success":
+            return result
+
+        if not allow_api_fallback:
             return result
 
         # Fallback: API-based auth produces a sid cookie, which is less

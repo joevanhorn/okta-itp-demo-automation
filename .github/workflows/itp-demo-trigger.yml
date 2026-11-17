@@ -130,7 +130,7 @@ jobs:
         if: inputs.mode == 'real'
         run: |
           python -m pip install --upgrade pip
-          pip install requests pyotp playwright boto3
+          pip install requests "pyotp>=2.9,<2.12" playwright boto3
           playwright install chromium
 
       - name: Configure AWS Credentials
@@ -164,6 +164,8 @@ jobs:
             ARGS="$ARGS --auto-reset"
           fi
 
+          # pipefail so a script failure fails the step instead of being masked by tee
+          set -o pipefail
           cd scripts
           python3 trigger_itp_demo.py $ARGS 2>&1 | tee ../demo.log
 
@@ -189,6 +191,8 @@ jobs:
             ARGS="$ARGS --auto-reset"
           fi
 
+          # pipefail so a script failure fails the step instead of being masked by tee
+          set -o pipefail
           cd scripts
           python3 trigger_itp_demo.py $ARGS 2>&1 | tee ../demo.log
 
@@ -205,6 +209,8 @@ jobs:
             ARGS="$ARGS --auto-reset"
           fi
 
+          # pipefail so a script failure fails the step instead of being masked by tee
+          set -o pipefail
           cd scripts
           python3 trigger_itp_demo.py $ARGS 2>&1 | tee ../demo.log
 

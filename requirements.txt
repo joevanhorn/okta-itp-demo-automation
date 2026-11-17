@@ -8,7 +8,7 @@ cryptography>=41.0.0
 
 # Real mode (browser automation)
 playwright>=1.40.0
-pyotp>=2.9.0
+pyotp>=2.9.0,<2.12  # 2.12+ rejects Okta's 80-bit TOTP secrets
 
 # Formatting
 colorama>=0.4.6
