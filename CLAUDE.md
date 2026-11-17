@@ -128,7 +128,7 @@ docs/
 
 ## Key Dependencies
 
-- **Python**: requests, boto3, pyjwt, cryptography, playwright, pyotp
+- **Python**: requests, boto3, pyjwt, cryptography, playwright, pyotp (<2.12; 2.12+ rejects Okta's 80-bit TOTP seeds)
 - **Terraform**: AWS provider, tls provider, external provider
 - **AWS**: Lambda, SSM Parameter Store, S3 (optional for videos)
 - **Okta APIs**: User risk, system logs, security events, entity risk policies

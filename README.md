@@ -163,10 +163,16 @@ No infrastructure needed. Works immediately with just Okta API credentials.
 
 4. **Install Playwright and dependencies** (for headless browser):
    ```bash
-   pip install playwright pyotp
+   pip install playwright "pyotp>=2.9,<2.12"
    playwright install chromium
    playwright install-deps chromium  # system dependencies (libgbm, etc.)
    ```
+   Keep pyotp below 2.12. Version 2.12.0 rejects TOTP secrets shorter than
+   112 bits, and Okta's TOTP seeds are 80 bits (16 base32 characters), so
+   login fails with `Secrets must be at least 112 bits after decoding`.
+   Real mode stops with an error when browser login fails, because a
+   session created through the Authn API does not trigger session
+   hijacking detection when replayed.
 
 ### SSF Mode Setup
 

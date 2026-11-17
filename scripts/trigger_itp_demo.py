@@ -472,12 +472,16 @@ class ITPDemoTrigger:
         print("-" * 60)
 
         auth = SessionAuthenticator(self.org_name, self.base_url)
+        # No API fallback: a replayed Authn API sid does not trigger session
+        # hijacking detection, so the demo would "succeed" without ITP firing.
         auth_result = auth.authenticate(
             user_email, actual_password, totp_secret=actual_totp,
+            allow_api_fallback=False,
         )
 
         if auth_result["status"] != "success":
-            print(f"\nAuthentication failed: {auth_result.get('error')}")
+            print(f"\nBrowser authentication failed: {auth_result.get('error')}")
+            print("  Aborting: session hijacking detection needs a browser session.")
             return False
 
         cookie_name = auth_result["cookie_name"]
